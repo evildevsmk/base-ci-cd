@@ -1,0 +1,45 @@
+name: Maven Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check if the branch is 'main'
+      - name: Ensure main branch
+        run: |
+          if [ "${{ github.ref_name }}" != "main" ]; then
+            echo "Error: This workflow can only be triggered from the 'main' branch."
+            exit 1
+          fi
+
+      # Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Set up Java
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # Configure Maven settings
+      - name: Set up Maven settings
+        run: |
+          echo "<settings xmlns='http://maven.apache.org/SETTINGS/1.0.0' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xsi:schemaLocation='http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd'>
+                  <servers>
+                      <server>
+                          <id>github</id>
+                          <username>${{ secrets.GITHUB_USERNAME }}</username>
+                          <password>${{ secrets.GITHUB_PAT }}</password>
+                      </server>
+                  </servers>
+              </settings>" > settings-deploy.xml
+
+      # Run Maven deploy
+      - name: Deploy with Maven
+        run: mvn deploy -s settings-deploy.xml -f pom.xml
