@@ -1,0 +1,168 @@
+name: Finish Release Branch
+
+permissions:
+  contents: write
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+      pom_path:
+        required: true
+        type: string
+
+jobs:
+  finish-release:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Cancel if selected branch is not a release branch
+        if: "! startsWith(github.ref, 'refs/heads/release/')"
+        run: |
+          echo "Selected branch is not a release branch. Canceling pipeline."
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history
+
+      - name: Set up Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Merge release branch into main and create release tag
+        run: |
+          release_branch=${{ github.ref }}
+          release_branch=${release_branch#refs/heads/}
+          git fetch
+          git checkout main
+
+          # Step 1: Merge the release branch
+          if ! git merge $release_branch; then
+          
+          # Step 2: Resolve conflicts for the <version> tag in the pom.xml file
+          release_version=$(git show $release_branch:${{ inputs.pom_path }} | grep -oPm1 "(?<=<version>)[^<]+")
+          mvn -f ${{ inputs.pom_path }} versions:set -DnewVersion=$release_version
+          
+          # Step 3: Add the resolved pom.xml file to the staging area
+          git add ${{ inputs.pom_path }}
+          
+          # Step 4: Commit the merge
+          git commit -m "Merge $release_branch and accept theirs for <version> tag in pom.xml"
+          fi
+          
+          git push origin main
+          new_tag=$(echo $release_branch | sed 's|release/||')
+          git tag $new_tag
+          git push origin $new_tag
+          git push origin --delete $release_branch
+          echo "new_tag=${new_tag}" >> $GITHUB_ENV
+          echo "::set-output name=new_tag::${new_tag}"  # Set the output that will be read from release deployment.
+
+      - name: Merge main into develop
+        run: |
+          git fetch
+          git checkout develop
+
+          git merge --no-ff main -m "align main and develop"
+
+          new_tag=${{ env.new_tag }}
+          IFS='.' read -r -a version_parts <<< "$new_tag"
+          major=${version_parts[0]}
+          minor=${version_parts[1]}
+          patch=${version_parts[2]}
+          patch=$((patch + 1))
+          new_snapshot_version="$major.$minor.$patch-SNAPSHOT"
+          
+          # Set the new version using Maven
+          mvn -f ${{ inputs.pom_path }} versions:set -DnewVersion=$new_snapshot_version
+
+          git commit -am "bump version to $new_snapshot_version"
+
+          git push origin develop
+
+  
+  release-deployment:
+   needs: finish-release
+   runs-on: ubuntu-latest
+
+   permissions:
+    contents: write
+    pull-requests: write
+
+   steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: main
+
+    - name: Debug new_tag
+      run: echo "new_tag=${{ needs.finish-release.outputs.new_tag }}"
+
+    - name: Setup git-chglog
+      run: |
+        CHGLOG_VERSION="0.9.1"
+        curl -o git-chglog -L "https://github.com/git-chglog/git-chglog/releases/download/${CHGLOG_VERSION}/git-chglog_linux_amd64"
+        chmod +x git-chglog
+
+    - name: Generate CHANGELOG.md
+      id: generate
+      run: |
+        rm -f CHANGELOG.md
+        ./git-chglog -o CHANGELOG.md
+        if git diff --quiet CHANGELOG.md; then
+          echo "changes=false" >> $GITHUB_OUTPUT
+        else
+          echo "changes=true" >> $GITHUB_OUTPUT
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Cleanup
+      run: rm git-chglog
+      if: always()
+
+    - name: Create Pull Request
+      if: steps.generate.outputs.changes == 'true'
+      uses: peter-evans/create-pull-request@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "chore: update CHANGELOG.md"
+        title: "📝 Update Changelog"
+        body: |
+          This PR updates the CHANGELOG.md to include all releases.
+          - Generated using git-chglog
+          - Triggered by: ${{ github.event_name }}
+          - Auto-merge enabled
+        branch: update-changelog-${{ github.run_id }}
+        base: main
+        delete-branch: true
+        labels: documentation, automated-pr
+
+    - name: Enable Auto-merge
+      if: steps.generate.outputs.changes == 'true'
+      run: |
+        gh pr merge --auto --merge "${{ steps.create-pr.outputs.pull-request-number }}"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

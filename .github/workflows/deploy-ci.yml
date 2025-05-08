@@ -1,0 +1,102 @@
+name: Deploy using Terraform
+# This workflow deploys the latest image on the specified environment.
+# The intended usage is for deploying testing artifacts for the development environments.
+# For deploying production and stage images, use the build-and-deploy workflow.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: string
+      tf_prefix:
+        description: 'Prefix for the Terraform backend configuration'
+        required: false
+        type: string
+        default: 'terraform/infra'
+      tf_state_bucket_suffix:
+        description: 'The terraform state bucket suffix for the project terraform configuration. Please include a dash at the start if provided'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  deploy:
+    runs-on: [ self-hosted-dev, linux, X64 ]
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Setup deployment environment variables
+        run: |
+          echo "KK_TEAM=$(cat ./.terraform/${{ github.event.inputs.environment || inputs.environment }}.tfvars | grep ^kiosk-team | cut -d '=' -f2 | xargs)" >> $GITHUB_ENV
+          echo "KK_FOLDER=$(cat ./.terraform/${{ github.event.inputs.environment || inputs.environment }}.tfvars | grep ^kiosk-folder | cut -d '=' -f2 | xargs)" >> $GITHUB_ENV
+          echo "ENVIRONMENT=${{ github.event.inputs.environment || inputs.environment }}" >> $GITHUB_ENV
+          echo "TF_PREFIX=${{ github.event.inputs.tf_prefix || inputs.tf_prefix }}" >> $GITHUB_ENV
+          echo "TF_STATE_BUCKET_SUFFIX=${{ github.event.inputs.tf_state_bucket_suffix || inputs.tf_state_bucket_suffix }}" >> $GITHUB_ENV
+      - name: Authenticate on GCP
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/277241474749/locations/global/workloadIdentityPools/github-actions/providers/github-actions-provider'
+          token_format: "access_token"
+          service_account: "${{ env.KK_TEAM }}-${{ env.KK_FOLDER }}-folder-n@projekte-project-factory-da34.iam.gserviceaccount.com"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+          terraform_wrapper: false
+
+      - name: Setup Terraform variables
+        id: vars
+        run: |-
+          cat > pipeline.auto.tfvars <<EOF
+          image_tag = "latest"
+          EOF
+        working-directory: ./.terraform/infra/
+
+      - name: Terraform fmt
+        id: fmt
+        run: terraform fmt -check
+        continue-on-error: true
+        working-directory: ./.terraform/infra/
+
+      - name: Terraform Init
+        id: init
+        run: |
+          terraform init \
+          -backend-config="impersonate_service_account=project-service-account@${{ env.ENVIRONMENT }}.iam.gserviceaccount.com" \
+          -backend-config="bucket=state-europe-west3-${{ env.ENVIRONMENT }}${{ env.TF_STATE_BUCKET_SUFFIX }}" \
+          -backend-config="prefix=${{ env.TF_PREFIX }}"
+        working-directory: ./.terraform/infra/
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+        working-directory: ./.terraform/infra/
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -var-file=../${{ env.ENVIRONMENT }}.tfvars -no-color
+        continue-on-error: true
+        working-directory: ./.terraform/infra/
+
+      - name: Terraform Plan Status
+        if: "(steps.plan.outcome == 'failure')"
+        run: exit 1
+        working-directory: ./.terraform/infra/
+
+      - name: Terraform Apply
+        run: terraform apply -var-file=../${{ env.ENVIRONMENT }}.tfvars -auto-approve
+        working-directory: ./.terraform/infra/
+
+      - name: Kiosk Artifacts (Serverless Ingress Definition)
+        run: terraform output -raw kiosk_runner_urls
+        working-directory: ./.terraform/infra/

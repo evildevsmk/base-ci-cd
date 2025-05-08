@@ -1,0 +1,135 @@
+name: Create Release Branch
+
+permissions:
+  contents: write
+
+on:
+  workflow_call:
+    inputs:
+      version_type:
+        description: 'Select the release type'
+        required: true
+        type: string
+      pom_path:
+        required: true
+        type: string
+    outputs:
+      version:
+        description: 'The new version created'
+        value: ${{ jobs.create-release-branch.outputs.version }}
+      branch:
+        description: 'The name of the release branch created'
+        value: ${{ jobs.create-release-branch.outputs.branch }}
+
+jobs:
+  create-release-branch:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.calculate_version.outputs.version }}
+      branch: ${{ steps.create_release_branch.outputs.branch }}
+
+    steps:
+
+      - name: Validate version type
+        run: |
+          if [[ "${{ inputs.version_type }}" != "major" && "${{ inputs.version_type }}" != "minor" ]]; then
+            echo "Invalid version type: ${{ inputs.version_type }}. Must be 'major' or 'minor'."
+            exit 1
+          fi
+
+      - name: Cancel if selected branch is not a develop branch
+        if: "! startsWith(github.ref, 'refs/heads/develop')"
+        run: |
+          echo "Selected branch is not a develop branch. Canceling pipeline."
+          exit 1
+
+      - name: Set up Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history
+
+      - name: Check for existing release branches
+        id: check_release_branches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: branches } = await github.rest.repos.listBranches({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const releaseBranches = branches.filter(branch => branch.name.startsWith('release/'));
+            core.setOutput('cancel_pipeline', releaseBranches.length > 0 ? 'true' : 'false');
+
+      - name: Cancel if release branches exist
+        if: steps.check_release_branches.outputs.cancel_pipeline == 'true'
+        run: |
+          echo "Release branches already exist. Canceling pipeline."
+          exit 1
+
+      - name: Get current version
+        id: get_version
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${{ inputs.pom_path }})
+          if [ -z "$VERSION" ]; then
+            VERSION="0.0.0"
+          else
+            VERSION=${VERSION%-SNAPSHOT}
+          fi
+          echo "current_version=$VERSION" >> $GITHUB_ENV
+
+      - name: Calculate new version
+        id: calculate_version
+        run: |
+          current_version=${{ env.current_version }}
+          version_type=${{ inputs.version_type }}
+          IFS='.' read -r -a version_parts <<< "$current_version"
+          major=${version_parts[0]}
+          minor=${version_parts[1]}
+          patch=${version_parts[2]}
+          if [ "$version_type" == "major" ]; then
+            major=$((major + 1))
+            minor=0
+            patch=0
+          else
+            minor=$((minor + 1))
+            patch=0
+          fi
+          new_version="$major.$minor.$patch"
+          echo "new_version=$new_version" >> $GITHUB_ENV
+          echo "version=$new_version" >> $GITHUB_OUTPUT
+
+      - name: Create release branch
+        id: create_release_branch
+        run: |
+          new_version=${{ env.new_version }}
+
+          git fetch
+          git checkout develop
+          git checkout -b release/$new_version
+
+          # Set the new version using Maven
+          mvn -f ${{ inputs.pom_path }} versions:set -DnewVersion=$new_version
+
+          git commit -am "bump version to $new_version"
+          git push origin release/$new_version
+          echo "branch=release/${{ env.new_version }}" >> $GITHUB_OUTPUT

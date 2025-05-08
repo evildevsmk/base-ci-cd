@@ -1,0 +1,179 @@
+name: Finish Hotfix Branch
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+      pom_path:
+        required: true
+        type: string
+
+jobs:
+  finish-hotfix:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Cancel if selected branch is not a hotfix branch
+        if: "! startsWith(github.ref, 'refs/heads/hotfix/')"
+        run: |
+          echo "Selected branch is not a hotfix branch. Canceling pipeline."
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history
+
+      - name: Set up Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-    
+
+      - name: Get next hotfix version
+        id: get_hotfix_version
+        run: |
+          git fetch
+          git checkout main
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${{ inputs.pom_path }})
+
+          IFS='.' read -r -a version_parts <<< "$VERSION"
+          major=${version_parts[0]}
+          minor=${version_parts[1]}
+          patch=${version_parts[2]}
+          patch=$((patch + 1))
+
+          new_tag_version="$major.$minor.$patch"
+          echo "new_tag_version=$new_tag_version" >> $GITHUB_ENV
+
+      - name: Merge hotfix branch into main
+        run: |
+          hotfix_branch=${{ github.ref }}
+          hotfix_branch=${hotfix_branch#refs/heads/}
+          new_tag_version=${{ env.new_tag_version }}
+
+          git pull origin $hotfix_branch
+          git checkout main
+
+          git merge --no-ff $hotfix_branch -m "align main and hotfix branch"
+
+          # Set the new version using Maven
+          mvn -f ${{ inputs.pom_path }} versions:set -DnewVersion=$new_tag_version
+
+          git commit -am "bump version to $new_tag_version"
+          git push origin main
+
+          # Create new hotfix tag and delete hotfix branch
+          git tag $new_tag_version
+          git push origin $new_tag_version
+          git push origin --delete $hotfix_branch
+
+      - name: Open PR to merge main into develop
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch
+          git checkout develop
+          git checkout -b merge-${{ env.new_tag_version }}-into-develop
+
+          current_snapshot_version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${{ inputs.pom_path }})
+          current_snapshot_version=${current_snapshot_version%-SNAPSHOT}
+          IFS='.' read -r -a version_parts <<< "$current_snapshot_version"
+          major=${version_parts[0]}
+          minor=${version_parts[1]}
+          patch=${version_parts[2]}
+          patch=$((patch + 1))
+
+          new_snapshot_version="$major.$minor.$patch-SNAPSHOT"
+          mvn -f ${{ inputs.pom_path }} versions:set -DnewVersion=$new_snapshot_version
+          git commit -am "bump version to $new_snapshot_version"
+          git merge --no-ff main -X ours -m "align main and develop"
+
+          git push origin merge-${{ env.new_tag_version }}-into-develop
+          gh pr create --title "Hotfix: Merge ${{ env.new_tag_version }} into develop" --body "This PR merges changes from the main branch into the develop branch to ensure both branches are aligned after the hotfix." --base develop --head merge-${{ env.new_tag_version }}-into-develop --label "bug"
+     
+      
+      - name: Set Output for Hotfix Tag
+        id: hotfix_tag
+        run: echo "tag=${{ env.new_tag_version }}" >> $GITHUB_OUTPUT
+
+
+  release-deployment:
+    needs: finish-hotfix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: main
+
+    - name: Fetch tags and full history
+      run: |
+        if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+          git fetch --prune --tags --unshallow
+        else
+          git fetch --prune --tags
+        fi
+
+    - name: Setup git-chglog
+      run: |
+        CHGLOG_VERSION="0.9.1"
+        curl -o git-chglog -L "https://github.com/git-chglog/git-chglog/releases/download/${CHGLOG_VERSION}/git-chglog_linux_amd64"
+        chmod +x git-chglog
+
+    - name: Generate CHANGELOG.md for Hotfix
+      run: |
+        ./git-chglog --next-tag "${{ needs.finish-hotfix.outputs.tag }}" -o CHANGELOG.md
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Commit and Push Changelog
+      run: |
+        git config --local user.name "github-actions[bot]"
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git add CHANGELOG.md
+        git commit -m "📝 chore: update CHANGELOG.md for hotfix ${{ needs.finish-hotfix.outputs.tag }}"
+        git push origin main
+
+    - name: Create Pull Request to Update Develop
+      uses: peter-evans/create-pull-request@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "chore: update CHANGELOG.md"
+        title: "📝 Update Changelog for Hotfix ${{ needs.finish-hotfix.outputs.tag }}"
+        body: |
+          This PR updates the CHANGELOG.md to reflect the latest hotfix changes:
+          - Hotfix Version: **${{ needs.finish-hotfix.outputs.tag }}**
+        branch: update-hotfix-changelog-${{ github.run_id }}
+        base: main
+        delete-branch: true
+        labels: documentation, automated-pr
+
+
+     
+

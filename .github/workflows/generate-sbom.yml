@@ -1,0 +1,96 @@
+name: Generate SBOMs
+
+# This workflow generates Software Bill of Materials (SBOM) for the project using Syft and CycloneDX.
+# It creates SBOMs for Maven, NPM, Docker, Terraform, and GitHub Actions.
+# The generated SBOMs are stored in the `.sbom` directory and are committed back to the repository.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version number for the SBOM directory"
+        required: true
+        type: string
+        default: "1.0.0"
+      is_backend:
+        description: "Is the application a backend application"
+        required: true
+        type: boolean
+        default: true
+      branch:
+        description: "Branch to push the SBOM files to"
+        required: true
+        type: string
+
+jobs:
+  generate-sbom:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Resolve environment variables
+        id: resolve-env-vars
+        run: |
+          echo "INPUT_VERSION=${{ github.event.inputs.version || inputs.version }}" >> $GITHUB_ENV
+          echo "IS_BACKEND=${{ github.event.inputs.is_backend || inputs.is_backend }}" >> $GITHUB_ENV
+          echo "SBOM_DIR=.sbom/${{ github.event.inputs.version || inputs.version }}" >> $GITHUB_ENV
+          echo "BRANCH=${{ github.event.inputs.branch || inputs.branch }}" >> $GITHUB_ENV
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Create SBOM Directory
+        run: |
+          mkdir -p ${{ env.SBOM_DIR }}
+
+      - name: Set Up Java & Maven
+        if: ${{ env.IS_BACKEND == 'true' }}
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Generate Maven SBOM
+        if: ${{ env.IS_BACKEND == 'true' }}
+        run: |
+          mvn cyclonedx:makeAggregateBom -DoutputDirectory=${{ env.SBOM_DIR }}
+
+      - name: Generate NPM SBOM
+        if: ${{ env.IS_BACKEND == 'false' }}
+        run: |
+          sudo npm install -g npm
+          sudo npm install -g @cyclonedx/cyclonedx-npm
+          npm install
+          cyclonedx-npm --output-file ${{ env.SBOM_DIR }}/npm-sbom.json
+
+      - name: Extract Base Image from Dockerfile
+        id: extract-base-image
+        run: |
+          BASE_IMAGE=$(grep -m 1 '^FROM' Dockerfile | awk '{print $2}')
+          echo "base_image=$BASE_IMAGE" >> $GITHUB_ENV    
+
+      - name: Generate Docker SBOM
+        run: |
+          syft ${{ env.base_image }} -o cyclonedx-json > ${{ env.SBOM_DIR }}/docker-sbom.json
+
+      - name: Generate Terraform SBOM
+        run: |
+          syft -o cyclonedx-json . > ${{ env.SBOM_DIR }}/terraform-sbom.json
+
+      - name: Generate GitHub Actions SBOM
+        run: |
+          syft .github/workflows -o cyclonedx-json > ${{ env.SBOM_DIR }}/github-actions-sbom.json
+
+      - name: Commit and Push SBOMs
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin ${{ env.BRANCH }}
+          git checkout ${{ env.BRANCH }}
+          git pull origin ${{ env.BRANCH }}
+          git add ${{ env.SBOM_DIR }}
+          git commit -m "Generate SBOM files for ${{ env.INPUT_VERSION }} version" || echo "No changes to commit"
+          git push origin ${{ env.BRANCH }} || echo "No changes to push"

@@ -1,0 +1,127 @@
+name: CI for image build and push
+# This workflow builds and pushes a Docker image to Google Artifact Registry. The recommended usage is for building testing artifacts for the development environments.
+# This workflow is not intended to be used for building production and stage images. Use the build-and-deploy workflow for that purpose.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to to build the image for'
+        required: true
+        type: string
+      tag:
+        description: 'Git tag for the build'
+        required: false
+        type: string
+      image_folder:
+        description: 'The image folder in the artifact registry'
+        required: true
+        type: string
+      image_in_root_folder:
+        description: 'Is docker file in a root folder of the caller repo'
+        required: false
+        type: boolean
+        default: false
+      needs_profiling:
+        description: 'Does the image need profiling'
+        required: false
+        type: boolean
+        default: false
+     
+    
+jobs:
+  build:
+    runs-on: [ self-hosted-dev, linux, X64 ]
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve environment variables
+        id: resolve-env-vars
+        run: |
+          echo "IMAGE_FOLDER=${{ github.event.inputs.image_folder || inputs.image_folder }}" >> $GITHUB_ENV
+          echo "IMAGE_IN_ROOT_FOLDER=${{ github.event.inputs.image_in_root_folder || inputs.image_in_root_folder }}" >> $GITHUB_ENV
+          echo "NEEDS_PROFILING=${{ github.event.inputs.needs_profiling || inputs.needs_profiling }}" >> $GITHUB_ENV
+          echo "INPUT_TAG=${{ github.event.inputs.tag || inputs.tag }}" >> $GITHUB_ENV
+          echo "ENVIRONMENT=${{ github.event.inputs.environment || inputs.environment }}" >> $GITHUB_ENV
+          echo "KK_TEAM=$(cat ./.terraform/${{ github.event.inputs.environment || inputs.environment }}.tfvars | grep ^kiosk-team | cut -d '=' -f2 | xargs)" >> $GITHUB_ENV
+          echo "KK_FOLDER=$(cat ./.terraform/${{ github.event.inputs.environment || inputs.environment }}.tfvars | grep ^kiosk-folder | cut -d '=' -f2 | xargs)" >> $GITHUB_ENV
+          echo "ARTIFACTS_REGISTRY=$(cat ./.terraform/${{ github.event.inputs.environment || inputs.environment }}.tfvars | grep ^artifact-registry | cut -d '=' -f2 | xargs)" >> $GITHUB_ENV
+
+      - name: Determine tag or commit
+        id: determine-ref
+        run: |
+          git fetch --tags --all
+          echo "Checking if tag is empty..."
+          if [ -z "${{ env.INPUT_TAG }}" ]; then
+            echo "Tag is empty, checking branch..."
+            if [[ "${{ github.ref }}" == *"main"* ]]; then
+              REF=$(git describe --tags `git rev-list --tags --max-count=1`)
+            else
+              REF=$(git rev-parse "${{ github.ref }}")
+            fi
+          elif git show-ref --tags --quiet --verify -- "refs/tags/${{ env.INPUT_TAG }}"; then
+            echo "Tag exists, setting REF to ${{ env.INPUT_TAG }}"
+            REF=${{ env.INPUT_TAG }}
+          else
+            echo "The specified tag does not exist."
+            exit 1
+          fi
+          echo "REF=$REF" >> $GITHUB_ENV
+      - name: Checkout specific ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+
+      - name: Authenticate on GCP
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/277241474749/locations/global/workloadIdentityPools/github-actions/providers/github-actions-provider'
+          token_format: "access_token"
+          service_account: "${{ env.KK_TEAM }}-${{ env.KK_FOLDER }}-folder-n@projekte-project-factory-da34.iam.gserviceaccount.com"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: "europe-west3-docker.pkg.dev"
+          username: "oauth2accesstoken"
+          password: "${{ steps.auth.outputs.access_token }}"
+
+      - name: Resolve the docker image path
+        id: resolve-image-path
+        run: |
+          IMAGE_PATH="${{ env.ARTIFACTS_REGISTRY }}/${{ env.IMAGE_FOLDER }}:${{ env.REF }}"
+          echo "IMAGE_PATH=$IMAGE_PATH" >> $GITHUB_ENV
+
+      - name: Pre-build step
+        id: pre-build
+        run: |
+          if [ "${{ env.NEEDS_PROFILING }}" = false ] && docker pull ${{ env.IMAGE_PATH }}; then
+            echo "IMAGE_EXISTS=true" >> $GITHUB_ENV
+          else
+            case "${{ env.ENVIRONMENT }}" in
+              *prd*) echo "BUILD_ENV=prod" >> $GITHUB_ENV ;;
+              *abn* | *staging*) echo "BUILD_ENV=stage" >> $GITHUB_ENV ;;
+              *tst*) echo "BUILD_ENV=test" >> $GITHUB_ENV ;;
+              *) echo "BUILD_ENV=dev" >> $GITHUB_ENV ;;
+            esac
+            echo "IMAGE_EXISTS=false" >> $GITHUB_ENV    
+          fi
+
+      - name: Build and push Docker image if necessary
+        if: env.IMAGE_EXISTS == 'false'
+        run: |
+          if [ "${{ env.IMAGE_IN_ROOT_FOLDER }}" = true ]; then
+            docker build --no-cache -t ${{ env.IMAGE_PATH }} -m 8g . --build-arg service=${{ env.IMAGE_FOLDER }} --build-arg version=${{ env.REF }} --build-arg BUILD_ENV=${{ env.BUILD_ENV }}
+          else
+            docker build --no-cache -f ${{ env.IMAGE_FOLDER }}/Dockerfile -t ${{ env.IMAGE_PATH }} -m 8g ${{ env.IMAGE_FOLDER }} --build-arg service=${{ env.IMAGE_FOLDER }} --build-arg version=${{ env.REF }} --build-arg BUILD_ENV=${{ env.BUILD_ENV }}
+          fi
+          docker push ${{ env.IMAGE_PATH }}
+          docker tag ${{ env.IMAGE_PATH }} ${{ env.ARTIFACTS_REGISTRY }}/${{ env.IMAGE_FOLDER }}:${{ env.REF }}
+          docker push ${{ env.ARTIFACTS_REGISTRY }}/${{ env.IMAGE_FOLDER}}:${{ env.REF }}
+          docker tag ${{ env.IMAGE_PATH }} ${{ env.ARTIFACTS_REGISTRY }}/${{ env.IMAGE_FOLDER}}:latest
+          docker push ${{ env.ARTIFACTS_REGISTRY }}/${{ env.IMAGE_FOLDER }}:latest

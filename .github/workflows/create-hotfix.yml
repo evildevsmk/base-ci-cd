@@ -1,0 +1,42 @@
+name: Create Hotfix Branch
+
+permissions:
+  contents: write
+
+on:
+  workflow_call:
+    inputs:
+      branch_suffix:
+        description: 'Suffix for the hotfix branch'
+        required: true
+        type: string
+
+jobs:
+  create-hotfix-branch:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Cancel if selected branch is not a main branch
+        if: "! startsWith(github.ref, 'refs/heads/main')"
+        run: |
+          echo "Selected branch is not a main branch. Canceling pipeline."
+          exit 1
+
+      - name: Set up Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history
+
+      - name: Create hotfix branch
+        run: |
+          git fetch
+          git checkout main
+          git pull origin main
+          git checkout -b hotfix/${{ github.event.inputs.branch_suffix }}
+          git push origin hotfix/${{ github.event.inputs.branch_suffix }}
