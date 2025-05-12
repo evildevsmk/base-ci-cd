@@ -1,7 +1,12 @@
 name: Maven Deploy to GitHub Releases
 
 on:
-  workflow_dispatch:
+  workflow_call: # Add this to make the workflow reusable
+    inputs:
+      branch:
+        required: true
+        type: string
+        default: 'main'
 
 jobs:
   deploy:
@@ -11,8 +16,8 @@ jobs:
       # Check if the branch is 'main'
       - name: Ensure main branch
         run: |
-          if [ "${{ github.ref_name }}" != "main" ]; then
-            echo "Error: This workflow can only be triggered from the 'main' branch."
+          if [ "${{ inputs.branch }}" != "main" ]; then
+            echo "Error: This workflow can only be triggered for the 'main' branch."
             exit 1
           fi
 
