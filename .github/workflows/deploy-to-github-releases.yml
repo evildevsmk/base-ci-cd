@@ -7,12 +7,24 @@ on:
         required: true
         type: string
         default: 'main'
+      repo_name:
+        required: true
+        type: string
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
+
+      # Check if the repo_name is provided
+      - name: Check repo_name
+        run: |
+          if [ -z "${{ inputs.repo_name }}" ]; then
+            echo "Error: repo_name is required."
+            exit 1
+          fi
+
       # Check if the branch is 'main'
       - name: Ensure main branch
         run: |
@@ -51,6 +63,23 @@ jobs:
                           <password>${{ steps.generate-token.outputs.token }}</password>
                       </server>
                   </servers>
+                  <profiles>
+                    <profile>
+                      <id>github</id>
+                      <repositories>
+                        <repository>
+                          <snapshots>
+                            <enabled>false</enabled>
+                          </snapshots>
+                          <id>github</id>
+                          <url>https://maven.pkg.github.com/evildevsmk/${{ inputs.repo_name }}</url>
+                        </repository>
+                      </repositories>
+                    </profile>
+                </profiles>
+                <activeProfiles>
+                <activeProfile>github</activeProfile>
+                </activeProfiles>
               </settings>" > settings-deploy.xml
 
       # Run Maven deploy
