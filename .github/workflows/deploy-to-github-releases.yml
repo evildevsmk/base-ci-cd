@@ -6,7 +6,6 @@ on:
       branch:
         required: true
         type: string
-        default: 'main'
       repo_name:
         required: true
         type: string
@@ -82,6 +81,9 @@ jobs:
                 </activeProfiles>
               </settings>" > settings-deploy.xml
 
+      - name: Debug Maven settings
+        run: cat settings-deploy.xml
+
       # Run Maven deploy
       - name: Deploy with Maven
-        run: mvn deploy -s settings-deploy.xml -f pom.xml
+        run: mvn deploy -s settings-deploy.xml -X -f pom.xml
