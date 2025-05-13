@@ -2,6 +2,9 @@ name: Maven Deploy to GitHub Releases
 
 on:
   workflow_call:
+    secrets:
+      BOT_USERNAME: ${{ secrets.BOT_USERNAME }}
+      BOT_PAT: ${{ secrets.BOT_PAT }}
     inputs:
       branch:
         required: true
