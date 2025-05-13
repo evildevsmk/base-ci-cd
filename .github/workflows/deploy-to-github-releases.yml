@@ -43,7 +43,7 @@ jobs:
           GITHUB_USERNAME: ${{ secrets.BOT_USERNAME }}
           GITHUB_PAT: ${{ secrets.BOT_PAT }}
         run: |
-          echo "Using ${GITHUB_USERNAME} as username"
+          echo "Using ${{ env.GITHUB_USERNAME }} as username"
           cat > ${{ github.workspace }}/settings.xml <<EOF_
           <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -51,8 +51,8 @@ jobs:
             <servers>
               <server>
                 <id>github</id>
-                <username>${GITHUB_USERNAME}</username>
-                <password>${GITHUB_PAT}</password>
+                <username>${{ env.GITHUB_USERNAME }}</username>
+                <password>${{ env.GITHUB_PAT }}</password>
               </server>
             </servers>
             <profiles>
