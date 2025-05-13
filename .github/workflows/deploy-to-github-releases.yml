@@ -9,18 +9,17 @@ on:
       repo_name:
         required: true
         type: string
-
+    secrets:
+      BOT_USERNAME:
+        required: true
+      BOT_PAT:
+        required: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    env:
-      GITHUB_USERNAME: ${{ secrets.BOT_USERNAME }}
-      GITHUB_PAT: ${{ secrets.BOT_PAT }}
-
     steps:
-
       - name: Check repo_name
         run: |
           if [ -z "${{ inputs.repo_name }}" ]; then
@@ -38,7 +37,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-
       - name: Set up JDK
         uses: actions/setup-java@v3
         with:
@@ -46,6 +44,9 @@ jobs:
           java-version: '21'
 
       - name: Create Maven settings.xml
+        env:
+          GITHUB_USERNAME: ${{ secrets.BOT_USERNAME }}
+          GITHUB_PAT: ${{ secrets.BOT_PAT }}
         run: |
           cat > ${{ github.workspace }}/settings.xml <<EOF
           <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
@@ -72,9 +73,9 @@ jobs:
                 </repositories>
               </profile>
             </profiles>
-                <activeProfiles>
-                <activeProfile>github</activeProfile>
-                </activeProfiles>
+            <activeProfiles>
+              <activeProfile>github</activeProfile>
+            </activeProfiles>
           </settings>
           EOF
 
