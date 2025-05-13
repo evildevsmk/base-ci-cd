@@ -9,18 +9,18 @@ on:
       repo_name:
         required: true
         type: string
-      token:
-        required: true
-        type: string
 
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      GITHUB_USERNAME: ${{ secrets.BOT_USERNAME }}
+      GITHUB_PAT: ${{ secrets.BOT_PAT }}
+
     steps:
 
-      # Check if the repo_name is provided
       - name: Check repo_name
         run: |
           if [ -z "${{ inputs.repo_name }}" ]; then
@@ -28,7 +28,6 @@ jobs:
             exit 1
           fi
 
-      # Check if the branch is 'main'
       - name: Ensure main branch
         run: |
           if [ "${{ inputs.branch }}" != "main" ]; then
@@ -38,53 +37,46 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v3
-        with:
-          token: ${{ inputs.token }}
 
-      # Set up Java
+
       - name: Set up JDK
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      # Configure Maven settings
-      - name: Set up Maven settings
+      - name: Create Maven settings.xml
         run: |
-          echo "<settings xmlns='http://maven.apache.org/SETTINGS/1.0.0' xmlns:xsi='http://www.w3.org/2001/XMLSchema-instance' xsi:schemaLocation='http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd'>
-                  <servers>
-                      <server>
-                          <id>github</id>
-                          <username>${{ secrets.APP_ID }}</username>
-                          <password>${{ inputs.token }}</password>
-                      </server>
-                  </servers>
-                  <profiles>
-                    <profile>
-                      <id>github</id>
-                      <repositories>
-                        <repository>
-                          <snapshots>
-                            <enabled>false</enabled>
-                          </snapshots>
-                          <id>github</id>
-                          <url>https://maven.pkg.github.com/evildevsmk/${{ inputs.repo_name }}</url>
-                        </repository>
-                      </repositories>
-                    </profile>
-                </profiles>
+          cat > ${{ github.workspace }}/settings.xml <<EOF
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${GITHUB_USERNAME}</username>
+                <password>${GITHUB_PAT}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>github</id>
+                <repositories>
+                  <repository>
+                    <snapshots>
+                      <enabled>false</enabled>
+                    </snapshots>
+                    <id>github</id>
+                    <url>https://maven.pkg.github.com/evildevsmk/${{ inputs.repo_name }}</url>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
                 <activeProfiles>
                 <activeProfile>github</activeProfile>
                 </activeProfiles>
-              </settings>" > settings-deploy.xml
+          </settings>
+          EOF
 
-      - name: Debug token access
-        run: |
-          curl -H "Authorization: Bearer ${{ steps.generate-token.outputs.token }}" \
-               -H "Accept: application/vnd.github+json" \
-               https://api.github.com/user/installations
-      
-
-      # Run Maven deploy
       - name: Deploy with Maven
-        run: mvn deploy -s settings-deploy.xml -X -f pom.xml
+        run: mvn deploy -s ${{ github.workspace }}/settings.xml -f pom.xml -Pgithub
